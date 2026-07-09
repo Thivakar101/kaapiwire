@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="en" data-collapsed="false">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Kaapiwire</title>
+    <link rel="stylesheet" href="./styles.css" />
+    <script src="./main.js" defer></script>
+  </head>
+  <body>
+    <main id="app" class="app" aria-label="Kaapiwire news widget">
+      <button id="collapsedToggle" class="collapsed-toggle" type="button" aria-label="Expand Kaapiwire">
+        <span class="unread-badge" id="unreadBadge">3</span>
+        <span class="antenna-icon" aria-hidden="true">
+          <svg viewBox="0 0 40 40" focusable="false">
+            <g class="antenna-dots">
+              <circle cx="9" cy="9" r="1.4" />
+              <circle cx="14" cy="6" r="1.4" />
+              <circle cx="26" cy="6" r="1.4" />
+              <circle cx="31" cy="9" r="1.4" />
+              <circle cx="12" cy="14" r="1.4" />
+              <circle cx="28" cy="14" r="1.4" />
+              <circle cx="16" cy="19" r="1.4" />
+              <circle cx="20" cy="18" r="1.4" />
+              <circle cx="24" cy="19" r="1.4" />
+              <circle cx="20" cy="23" r="1.4" />
+              <circle cx="18" cy="27" r="1.4" />
+              <circle cx="22" cy="27" r="1.4" />
+              <circle cx="16" cy="32" r="1.4" />
+              <circle cx="20" cy="32" r="1.4" />
+              <circle cx="24" cy="32" r="1.4" />
+            </g>
+          </svg>
+        </span>
+      </button>
+
+      <section id="widget" class="widget" aria-label="Kaapiwire latest items">
+        <header id="widgetHeader" class="widget-header">
+          <span class="header-icon" aria-hidden="true" data-tauri-drag-region>
+            <svg viewBox="0 0 40 40" focusable="false">
+              <use href="#antennaShape"></use>
+            </svg>
+          </span>
+          <h1 data-tauri-drag-region>Kaapiwire</h1>
+          <button id="collapseButton" class="icon-button" type="button" aria-label="Collapse Kaapiwire">
+            <span aria-hidden="true"></span>
+          </button>
+        </header>
+
+        <nav class="section-tabs" aria-label="News sections">
+          <button class="section-tab is-active" type="button" data-section="Tech">Tech</button>
+          <button class="section-tab" type="button" data-section="General">General</button>
+        </nav>
+
+        <div id="itemList" class="item-list" role="list"></div>
+
+        <footer class="widget-footer">
+          <span class="live-dot" aria-hidden="true"></span>
+          <span id="lastUpdate">last update just now</span>
+          <button id="resizeHandle" class="footer-grip" type="button" aria-label="Resize Kaapiwire"></button>
+        </footer>
+      </section>
+
+      <svg class="svg-defs" aria-hidden="true" focusable="false">
+        <symbol id="antennaShape" viewBox="0 0 40 40">
+          <g class="antenna-dots">
+            <circle cx="9" cy="9" r="1.4" />
+            <circle cx="14" cy="6" r="1.4" />
+            <circle cx="26" cy="6" r="1.4" />
+            <circle cx="31" cy="9" r="1.4" />
+            <circle cx="12" cy="14" r="1.4" />
+            <circle cx="28" cy="14" r="1.4" />
+            <circle cx="16" cy="19" r="1.4" />
+            <circle cx="20" cy="18" r="1.4" />
+            <circle cx="24" cy="19" r="1.4" />
+            <circle cx="20" cy="23" r="1.4" />
+            <circle cx="18" cy="27" r="1.4" />
+            <circle cx="22" cy="27" r="1.4" />
+            <circle cx="16" cy="32" r="1.4" />
+            <circle cx="20" cy="32" r="1.4" />
+            <circle cx="24" cy="32" r="1.4" />
+          </g>
+        </symbol>
+      </svg>
+    </main>
+  </body>
+</html>

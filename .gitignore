@@ -1,6 +1,10 @@
 /src-tauri/target/
 /src-tauri/gen/
 /.tauri/
+.vs/
+.env
+.env.*
+sources.json
+src-tauri/sources.json
 *.log
 *.tmp
-

@@ -13,7 +13,10 @@ use std::{
     collections::{HashMap, HashSet},
     fs,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
     time::Duration,
 };
 use tauri::{
@@ -24,7 +27,7 @@ use tauri_runtime::ResizeDirection;
 use tokio::time::MissedTickBehavior;
 
 const MARGIN: i32 = 16;
-const COLLAPSED_WINDOW_SIZE: u32 = 64;
+const COLLAPSED_WINDOW_SIZE: u32 = 48;
 const DEFAULT_EXPANDED_WIDTH: u32 = 360;
 const DEFAULT_EXPANDED_HEIGHT: u32 = 430;
 const MIN_EXPANDED_WIDTH: u32 = 300;
@@ -33,8 +36,15 @@ const MAX_EXPANDED_WIDTH: u32 = 640;
 const MAX_EXPANDED_HEIGHT: u32 = 760;
 const DISPLAY_ITEM_LIMIT: usize = 40;
 const DISPLAY_SECTION_SOFT_LIMIT: usize = 20;
+const STARTUP_POLL_DELAY_SECONDS: u64 = 20;
 const USER_AGENT: &str =
     "Kaapiwire/0.1 (local Windows desktop widget; public polling; no telemetry)";
+
+static HN_ERROR_NOTICE_SHOWN: AtomicBool = AtomicBool::new(false);
+static TECHMEME_ERROR_NOTICE_SHOWN: AtomicBool = AtomicBool::new(false);
+static GITHUB_TRENDING_ERROR_NOTICE_SHOWN: AtomicBool = AtomicBool::new(false);
+static GENERAL_ERROR_NOTICE_SHOWN: AtomicBool = AtomicBool::new(false);
+static NEWSDATA_ERROR_NOTICE_SHOWN: AtomicBool = AtomicBool::new(false);
 
 #[derive(Clone)]
 struct AppState {
@@ -70,6 +80,8 @@ struct SourcesConfig {
     blogs: Vec<String>,
     #[serde(default)]
     general: Vec<String>,
+    #[serde(default)]
+    newsdata: sources::newsdata::NewsDataConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -86,6 +98,19 @@ struct ViewportMetrics {
 struct NewsEvent {
     items: Vec<NewsItem>,
     generated_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct YouTubeMediaResult {
+    id: String,
+    title: String,
+    detail: String,
+    kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    video_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    playlist_id: Option<String>,
 }
 
 #[tauri::command]
@@ -198,10 +223,51 @@ fn open_url(app: tauri::AppHandle, url: String) -> Result<(), String> {
         .map_err(|error| format!("Could not open URL: {error}"))
 }
 
+#[tauri::command]
+async fn search_youtube_media(
+    state: tauri::State<'_, Arc<AppState>>,
+    query: String,
+    media_type: String,
+) -> Result<Vec<YouTubeMediaResult>, String> {
+    let query = query.trim();
+    if query.len() < 2 {
+        return Ok(Vec::new());
+    }
+    let media_type = match media_type.trim().to_ascii_lowercase().as_str() {
+        "podcast" => "podcast",
+        _ => "music",
+    };
+    let search_query = format!("{query} {media_type}");
+
+    let mut url = url::Url::parse("https://www.youtube.com/results")
+        .map_err(|error| format!("Could not build YouTube search URL: {error}"))?;
+    url.query_pairs_mut()
+        .append_pair("search_query", &search_query)
+        .append_pair("hl", "en");
+
+    let html = state
+        .client
+        .get(url)
+        .send()
+        .await
+        .map_err(|error| format!("Could not search YouTube: {error}"))?
+        .error_for_status()
+        .map_err(|error| format!("YouTube search failed: {error}"))?
+        .text()
+        .await
+        .map_err(|error| format!("Could not read YouTube search results: {error}"))?;
+
+    parse_youtube_search_results(&html)
+}
+
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .setup(|app| {
+            if let Err(error) = ensure_autostart_registered() {
+                eprintln!("{error}");
+            }
+
             if let Err(error) = ensure_default_config_files(app.handle()) {
                 eprintln!("{error}");
             }
@@ -244,7 +310,8 @@ fn main() {
             start_drag,
             start_resize,
             move_window_by,
-            open_url
+            open_url,
+            search_youtube_media
         ])
         .run(tauri::generate_context!())
         .expect("error while running Kaapiwire");
@@ -252,6 +319,37 @@ fn main() {
 
 fn setup_error(message: impl Into<String>) -> std::io::Error {
     std::io::Error::new(std::io::ErrorKind::Other, message.into())
+}
+
+fn ensure_autostart_registered() -> Result<(), String> {
+    #[cfg(all(target_os = "windows", not(debug_assertions)))]
+    {
+        let exe = std::env::current_exe()
+            .map_err(|error| format!("Could not resolve Kaapiwire executable path: {error}"))?;
+        let exe_arg = format!("\"{}\"", exe.display());
+        let status = std::process::Command::new("reg")
+            .args([
+                "add",
+                r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run",
+                "/v",
+                "Kaapiwire",
+                "/t",
+                "REG_SZ",
+                "/d",
+                &exe_arg,
+                "/f",
+            ])
+            .status()
+            .map_err(|error| format!("Could not register Kaapiwire startup entry: {error}"))?;
+
+        if !status.success() {
+            return Err(format!(
+                "Could not register Kaapiwire startup entry: reg.exe exited with {status}"
+            ));
+        }
+    }
+
+    Ok(())
 }
 
 fn build_http_client() -> Result<reqwest::Client, String> {
@@ -289,12 +387,14 @@ fn start_pollers(app: tauri::AppHandle, state: Arc<AppState>) {
     spawn_github_trending_poller(app.clone(), state.clone());
     spawn_blog_poller(app.clone(), state.clone());
     spawn_general_poller(app.clone(), state.clone());
+    spawn_newsdata_poller(app.clone(), state.clone());
     spawn_snapshot_loop(app, state.clone());
     spawn_prune_loop(state);
 }
 
 fn spawn_hn_poller(app: tauri::AppHandle, state: Arc<AppState>) {
     tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(STARTUP_POLL_DELAY_SECONDS)).await;
         let mut interval = tokio::time::interval(Duration::from_secs(30));
         interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
@@ -302,7 +402,7 @@ fn spawn_hn_poller(app: tauri::AppHandle, state: Arc<AppState>) {
             interval.tick().await;
             match sources::hn::fetch(&state.client).await {
                 Ok(items) => handle_source_items(&app, &state, items),
-                Err(error) => eprintln!("{error}"),
+                Err(error) => log_poll_error_once(&HN_ERROR_NOTICE_SHOWN, error),
             }
         }
     });
@@ -310,6 +410,7 @@ fn spawn_hn_poller(app: tauri::AppHandle, state: Arc<AppState>) {
 
 fn spawn_techmeme_poller(app: tauri::AppHandle, state: Arc<AppState>) {
     tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(STARTUP_POLL_DELAY_SECONDS)).await;
         let mut interval = tokio::time::interval(Duration::from_secs(60));
         interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
@@ -317,7 +418,7 @@ fn spawn_techmeme_poller(app: tauri::AppHandle, state: Arc<AppState>) {
             interval.tick().await;
             match sources::techmeme::fetch(&state.client).await {
                 Ok(items) => handle_source_items(&app, &state, items),
-                Err(error) => eprintln!("{error}"),
+                Err(error) => log_poll_error_once(&TECHMEME_ERROR_NOTICE_SHOWN, error),
             }
         }
     });
@@ -325,6 +426,7 @@ fn spawn_techmeme_poller(app: tauri::AppHandle, state: Arc<AppState>) {
 
 fn spawn_reddit_poller(app: tauri::AppHandle, state: Arc<AppState>) {
     tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(STARTUP_POLL_DELAY_SECONDS)).await;
         let mut interval = tokio::time::interval(Duration::from_secs(60));
         interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
@@ -340,6 +442,7 @@ fn spawn_reddit_poller(app: tauri::AppHandle, state: Arc<AppState>) {
 
 fn spawn_github_trending_poller(app: tauri::AppHandle, state: Arc<AppState>) {
     tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(STARTUP_POLL_DELAY_SECONDS)).await;
         let mut interval = tokio::time::interval(Duration::from_secs(5 * 60));
         interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
@@ -347,7 +450,7 @@ fn spawn_github_trending_poller(app: tauri::AppHandle, state: Arc<AppState>) {
             interval.tick().await;
             match sources::github_trending::fetch(&state.client).await {
                 Ok(items) => handle_source_items(&app, &state, items),
-                Err(error) => eprintln!("{error}"),
+                Err(error) => log_poll_error_once(&GITHUB_TRENDING_ERROR_NOTICE_SHOWN, error),
             }
         }
     });
@@ -355,6 +458,7 @@ fn spawn_github_trending_poller(app: tauri::AppHandle, state: Arc<AppState>) {
 
 fn spawn_blog_poller(app: tauri::AppHandle, state: Arc<AppState>) {
     tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(STARTUP_POLL_DELAY_SECONDS)).await;
         let mut interval = tokio::time::interval(Duration::from_secs(60));
         interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
@@ -371,6 +475,7 @@ fn spawn_blog_poller(app: tauri::AppHandle, state: Arc<AppState>) {
 
 fn spawn_general_poller(app: tauri::AppHandle, state: Arc<AppState>) {
     tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(STARTUP_POLL_DELAY_SECONDS)).await;
         let mut interval = tokio::time::interval(Duration::from_secs(60));
         interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
@@ -379,10 +484,205 @@ fn spawn_general_poller(app: tauri::AppHandle, state: Arc<AppState>) {
             let feeds = load_general_sources(&state.config_dir);
             match sources::general::fetch(&state.client, &feeds).await {
                 Ok(items) => handle_source_items(&app, &state, items),
-                Err(error) => eprintln!("{error}"),
+                Err(error) => log_poll_error_once(&GENERAL_ERROR_NOTICE_SHOWN, error),
             }
         }
     });
+}
+
+fn spawn_newsdata_poller(app: tauri::AppHandle, state: Arc<AppState>) {
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(STARTUP_POLL_DELAY_SECONDS)).await;
+        let mut interval = tokio::time::interval(Duration::from_secs(30));
+        interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
+
+        loop {
+            interval.tick().await;
+            let config = load_newsdata_config(&state.config_dir);
+            match sources::newsdata::fetch(&state.client, &config).await {
+                Ok(items) => handle_source_items(&app, &state, items),
+                Err(error) => log_poll_error_once(&NEWSDATA_ERROR_NOTICE_SHOWN, error),
+            }
+        }
+    });
+}
+
+fn log_poll_error_once(flag: &AtomicBool, error: String) {
+    if !flag.swap(true, Ordering::Relaxed) {
+        eprintln!("{error}");
+    }
+}
+
+fn parse_youtube_search_results(html: &str) -> Result<Vec<YouTubeMediaResult>, String> {
+    let initial_data = extract_json_assignment(html, "var ytInitialData = ")
+        .or_else(|| extract_json_assignment(html, "window[\"ytInitialData\"] = "))
+        .ok_or_else(|| "Could not find YouTube search data.".to_string())?;
+    let value: serde_json::Value = serde_json::from_str(initial_data)
+        .map_err(|error| format!("Could not parse YouTube search data: {error}"))?;
+
+    let mut results = Vec::new();
+    let mut seen = HashSet::new();
+    collect_youtube_results(&value, &mut results, &mut seen);
+    results.truncate(12);
+    Ok(results)
+}
+
+fn extract_json_assignment<'a>(html: &'a str, marker: &str) -> Option<&'a str> {
+    let marker_index = html.find(marker)?;
+    let start = marker_index + marker.len();
+    let bytes = html.as_bytes();
+    let mut depth = 0_i32;
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut json_start = None;
+
+    for index in start..bytes.len() {
+        let byte = bytes[index];
+        if json_start.is_none() {
+            if byte == b'{' {
+                json_start = Some(index);
+                depth = 1;
+            }
+            continue;
+        }
+
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == b'"' {
+                in_string = false;
+            }
+            continue;
+        }
+
+        match byte {
+            b'"' => in_string = true,
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    let start = json_start?;
+                    return html.get(start..=index);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    None
+}
+
+fn collect_youtube_results(
+    value: &serde_json::Value,
+    results: &mut Vec<YouTubeMediaResult>,
+    seen: &mut HashSet<String>,
+) {
+    if results.len() >= 12 {
+        return;
+    }
+
+    match value {
+        serde_json::Value::Object(object) => {
+            if let Some(renderer) = object.get("playlistRenderer") {
+                if let Some(result) = parse_playlist_renderer(renderer) {
+                    if seen.insert(result.id.clone()) {
+                        results.push(result);
+                    }
+                }
+            }
+
+            if let Some(renderer) = object.get("videoRenderer") {
+                if let Some(result) = parse_video_renderer(renderer) {
+                    if seen.insert(result.id.clone()) {
+                        results.push(result);
+                    }
+                }
+            }
+
+            for child in object.values() {
+                collect_youtube_results(child, results, seen);
+                if results.len() >= 12 {
+                    break;
+                }
+            }
+        }
+        serde_json::Value::Array(values) => {
+            for child in values {
+                collect_youtube_results(child, results, seen);
+                if results.len() >= 12 {
+                    break;
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn parse_playlist_renderer(renderer: &serde_json::Value) -> Option<YouTubeMediaResult> {
+    let playlist_id = renderer.get("playlistId")?.as_str()?.to_string();
+    let title = extract_text(renderer.get("title")?)?;
+    let detail = renderer
+        .get("videoCount")
+        .and_then(serde_json::Value::as_str)
+        .map(|count| format!("{count} videos playlist"))
+        .unwrap_or_else(|| "YouTube playlist".to_string());
+
+    Some(YouTubeMediaResult {
+        id: format!("yt-playlist-{playlist_id}"),
+        title: clean_youtube_title(&title),
+        detail,
+        kind: "playlist".into(),
+        video_id: None,
+        playlist_id: Some(playlist_id),
+    })
+}
+
+fn parse_video_renderer(renderer: &serde_json::Value) -> Option<YouTubeMediaResult> {
+    let video_id = renderer.get("videoId")?.as_str()?.to_string();
+    let title = extract_text(renderer.get("title")?)?;
+    let channel = renderer
+        .get("ownerText")
+        .or_else(|| renderer.get("shortBylineText"))
+        .and_then(extract_text)
+        .unwrap_or_else(|| "YouTube video".to_string());
+
+    Some(YouTubeMediaResult {
+        id: format!("yt-video-{video_id}"),
+        title: clean_youtube_title(&title),
+        detail: channel,
+        kind: "video".into(),
+        video_id: Some(video_id),
+        playlist_id: None,
+    })
+}
+
+fn extract_text(value: &serde_json::Value) -> Option<String> {
+    if let Some(text) = value.get("simpleText").and_then(serde_json::Value::as_str) {
+        return Some(text.to_string());
+    }
+
+    let runs = value.get("runs")?.as_array()?;
+    let text = runs
+        .iter()
+        .filter_map(|run| run.get("text").and_then(serde_json::Value::as_str))
+        .collect::<Vec<_>>()
+        .join("");
+    if text.trim().is_empty() {
+        None
+    } else {
+        Some(text)
+    }
+}
+
+fn clean_youtube_title(title: &str) -> String {
+    title
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&amp;", "&")
+        .trim()
+        .to_string()
 }
 
 fn spawn_prune_loop(state: Arc<AppState>) {
@@ -636,6 +936,15 @@ fn load_general_sources(config_dir: &Path) -> Vec<String> {
         .unwrap_or_default()
 }
 
+fn load_newsdata_config(config_dir: &Path) -> sources::newsdata::NewsDataConfig {
+    let path = config_dir.join("sources.json");
+    fs::read_to_string(path)
+        .ok()
+        .and_then(|contents| serde_json::from_str::<SourcesConfig>(&contents).ok())
+        .map(|config| config.newsdata)
+        .unwrap_or_default()
+}
+
 fn write_if_missing(path: &Path, contents: &str) -> Result<(), String> {
     if path.exists() {
         return Ok(());
@@ -681,7 +990,11 @@ const DEFAULT_SOURCES_JSON: &str = r#"{
     "https://feeds.bbci.co.uk/news/world/rss.xml",
     "https://feeds.npr.org/1004/rss.xml",
     "https://www.theguardian.com/world/rss"
-  ]
+  ],
+  "newsdata": {
+    "enabled": true,
+    "language": "en"
+  }
 }
 "#;
 

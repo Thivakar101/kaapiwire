@@ -12,6 +12,7 @@ The project is intentionally local-first. There are no accounts, no telemetry, n
 - Opens headlines in the system browser instead of navigating inside the WebView.
 - Polls public free sources and stores dedupe/history locally in SQLite.
 - Persists widget state in a local JSON config file.
+- Release builds register themselves to start automatically when the Windows user logs in.
 
 ## Why Tauri
 
@@ -29,6 +30,7 @@ Kaapiwire only uses public, no-key, zero-cost sources:
 - GitHub Trending page scraping
 - Company blog RSS/feed discovery
 - General world-news RSS feeds
+- NewsData.io latest news API, when a local API key is configured
 
 Default company sources are:
 
@@ -99,7 +101,9 @@ Useful files:
 
 - `config.json` stores collapsed/expanded state and widget size.
 - `keywords.json` stores relevance keywords.
-- `sources.json` stores editable blog and general RSS sources.
+- `sources.json` stores editable blog/general RSS sources and optional NewsData.io settings.
+
+To enable NewsData.io live polling, add a local `newsdata.apiKey` entry to `sources.json` or set `NEWSDATA_API_KEY` in the app environment. API keys should stay local and should not be committed.
 
 The SQLite database lives under:
 
@@ -130,7 +134,7 @@ cargo install tauri-cli --version "^2"
 From the project root:
 
 ```powershell
-cd "C:\Users\THIVAKAR\OneDrive\ドキュメント\kaapiwire"
+cd path\to\kaapiwire
 cargo tauri dev
 ```
 
@@ -139,6 +143,28 @@ If an old copy is already running:
 ```powershell
 taskkill /IM kaapiwire.exe /F
 cargo tauri dev
+```
+
+## Startup Behavior
+
+Release builds of Kaapiwire register themselves in the current user's Windows startup list:
+
+```text
+HKCU\Software\Microsoft\Windows\CurrentVersion\Run
+```
+
+That means it starts automatically after login without admin rights, a Windows service, a scheduled task, or cloud sync. Development builds do not register themselves, so `cargo tauri dev` will not leave a debug console app in Windows startup.
+
+To check the startup entry:
+
+```powershell
+reg query "HKCU\Software\Microsoft\Windows\CurrentVersion\Run" /v Kaapiwire
+```
+
+To remove the startup entry:
+
+```powershell
+reg delete "HKCU\Software\Microsoft\Windows\CurrentVersion\Run" /v Kaapiwire /f
 ```
 
 ## Building

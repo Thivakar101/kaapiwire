@@ -1,4 +1,4 @@
-use crate::pipeline::{NewsItem, RawItem};
+use crate::pipeline::{importance_tag_for, NewsItem, RawItem};
 use rusqlite::{params, Connection, OptionalExtension};
 use std::{path::Path, sync::Mutex};
 
@@ -221,7 +221,7 @@ impl Db {
         let conn = self.connection()?;
         let mut stmt = conn
             .prepare(
-                "SELECT id, title, url, source, timestamp, raw_score, importance, relevance, tag, section
+                "SELECT id, title, url, source, timestamp, raw_score, importance, relevance, section
                  FROM seen_items
                  WHERE visible = 1
                  ORDER BY timestamp DESC, first_seen DESC
@@ -242,8 +242,8 @@ impl Db {
                     raw_score,
                     importance,
                     relevance,
-                    tag: row.get(8)?,
-                    section: row.get(9)?,
+                    tag: importance_tag_for(importance).into(),
+                    section: row.get(8)?,
                 })
             })
             .map_err(|error| format!("Could not query visible items: {error}"))?;
@@ -279,7 +279,7 @@ impl Db {
                     raw_score,
                     importance: 0,
                     relevance: 0,
-                    tag: "General".into(),
+                    tag: importance_tag_for(0).into(),
                     section: row.get(6)?,
                 })
             })

@@ -16,6 +16,7 @@ pub enum SourceKind {
     GithubTrending,
     Blog,
     General,
+    NewsData,
 }
 
 impl SourceKind {
@@ -27,6 +28,7 @@ impl SourceKind {
             Self::GithubTrending => "github_trending",
             Self::Blog => "blog",
             Self::General => "general",
+            Self::NewsData => "newsdata",
         }
     }
 }
@@ -86,13 +88,18 @@ pub fn process_items(db: &Db, keywords: &[String], items: Vec<RawItem>) -> Vec<N
             observed_at,
         );
         let relevance = score_relevance(&raw.title, keywords);
-        let tag = tag_for(importance, relevance);
+        let tag = tag_for(importance);
         let fresh_age = observed_at.saturating_sub(raw.timestamp);
         let fresh_public_story =
             matches!(raw.source_kind, SourceKind::HackerNews) && fresh_age <= 180;
         let general_story = matches!(raw.source_kind, SourceKind::General);
+        let newsdata_story = matches!(raw.source_kind, SourceKind::NewsData);
         let visible = duplicate_of.is_none()
-            && (importance > 40 || relevance > 50 || fresh_public_story || general_story);
+            && (importance > 40
+                || relevance > 50
+                || fresh_public_story
+                || general_story
+                || newsdata_story);
 
         let item = NewsItem {
             id: raw.id.clone(),
@@ -226,6 +233,7 @@ fn score_importance(
         SourceKind::GithubTrending => 38 + (raw.raw_score / 30).min(14) as i32,
         SourceKind::Blog => 46,
         SourceKind::General => 42,
+        SourceKind::NewsData => 44,
     };
 
     let cross_source_bonus = corroborating_sources.saturating_sub(1).min(2) as i32 * 22;
@@ -267,14 +275,18 @@ fn score_relevance(title: &str, keywords: &[String]) -> u8 {
     score.clamp(0, 100) as u8
 }
 
-fn tag_for(importance: u8, relevance: u8) -> String {
+pub fn importance_tag_for(importance: u8) -> &'static str {
     if importance > 70 {
-        "Breaking".into()
-    } else if relevance > 60 {
-        "Watching".into()
+        "Very Important"
+    } else if importance >= 40 {
+        "Medium Important"
     } else {
-        "General".into()
+        "Less Important"
     }
+}
+
+fn tag_for(importance: u8) -> String {
+    importance_tag_for(importance).into()
 }
 
 fn title_similarity(a: &str, b: &str) -> f32 {

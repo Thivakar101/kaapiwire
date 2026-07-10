@@ -10,7 +10,6 @@
   <body>
     <main id="app" class="app" aria-label="Kaapiwire news widget">
       <button id="collapsedToggle" class="collapsed-toggle" type="button" aria-label="Expand Kaapiwire">
-        <span class="unread-badge" id="unreadBadge">3</span>
         <span class="antenna-icon" aria-hidden="true">
           <svg viewBox="0 0 40 40" focusable="false">
             <g class="antenna-dots">
@@ -47,10 +46,26 @@
           </button>
         </header>
 
-        <nav class="section-tabs" aria-label="News sections">
+        <nav class="section-tabs" aria-label="Kaapiwire sections">
           <button class="section-tab is-active" type="button" data-section="Tech">Tech</button>
           <button class="section-tab" type="button" data-section="General">General</button>
+          <button class="section-tab" type="button" data-section="Todo">Todo</button>
+          <button class="section-tab" type="button" data-section="Pomodoro">Timer</button>
+          <button class="section-tab" type="button" data-section="Media">Media</button>
         </nav>
+
+        <section id="mediaPlayer" class="media-player" aria-label="YouTube media player">
+          <div class="media-player-meta">
+            <span id="mediaNowPlaying">Nothing playing</span>
+          </div>
+          <iframe
+            id="mediaFrame"
+            class="media-frame"
+            title="YouTube player"
+            allow="autoplay; encrypted-media; picture-in-picture; web-share"
+            allowfullscreen
+          ></iframe>
+        </section>
 
         <div id="itemList" class="item-list" role="list"></div>
 

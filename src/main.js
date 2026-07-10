@@ -7,6 +7,15 @@ const MAX_WIDGET_WIDTH = 640;
 const MAX_WIDGET_HEIGHT = 760;
 const MAX_RENDERED_ITEMS = 40;
 const COLLAPSED_DRAG_THRESHOLD = 6;
+const NEWS_SECTIONS = new Set(["Tech", "General"]);
+const TOOL_SECTIONS = new Set(["Todo", "Pomodoro", "Media"]);
+const APP_SECTIONS = new Set([...NEWS_SECTIONS, ...TOOL_SECTIONS]);
+const TODO_STORAGE_KEY = "kaapiwire.todos";
+const POMODORO_STORAGE_KEY = "kaapiwire.pomodoro";
+const MEDIA_SEARCH_MODE_KEY = "kaapiwire.media.searchMode";
+const DEFAULT_WORK_MINUTES = 25;
+const DEFAULT_BREAK_MINUTES = 5;
+const MEDIA_SEARCH_DEBOUNCE_MS = 450;
 
 const fallbackItems = [
   {
@@ -74,11 +83,19 @@ const fallbackItems = [
 const appState = {
   collapsed: false,
   items: [],
-  unread: 0,
   width: DEFAULT_WIDGET_WIDTH,
   height: DEFAULT_WIDGET_HEIGHT,
-  activeSection: localStorage.getItem("kaapiwire.section") || "Tech",
-  lastUpdateAt: Date.now()
+  activeSection: getSavedSection(),
+  lastUpdateAt: Date.now(),
+  todos: loadTodos(),
+  pomodoro: createPomodoroState(),
+  media: {
+    activeItem: null,
+    searchMode: loadMediaSearchMode(),
+    searchQuery: "",
+    searchResults: [],
+    searchStatus: ""
+  }
 };
 
 const tauriApi = window.__TAURI__;
@@ -94,7 +111,9 @@ const elements = {
   collapsedToggle: document.querySelector("#collapsedToggle"),
   collapseButton: document.querySelector("#collapseButton"),
   resizeHandle: document.querySelector("#resizeHandle"),
-  unreadBadge: document.querySelector("#unreadBadge"),
+  mediaPlayer: document.querySelector("#mediaPlayer"),
+  mediaFrame: document.querySelector("#mediaFrame"),
+  mediaNowPlaying: document.querySelector("#mediaNowPlaying"),
   lastUpdate: document.querySelector("#lastUpdate")
 };
 
@@ -149,8 +168,7 @@ async function init() {
     appState.width = clamp(config.width || DEFAULT_WIDGET_WIDTH, MIN_WIDGET_WIDTH, MAX_WIDGET_WIDTH);
     appState.height = clamp(config.height || DEFAULT_WIDGET_HEIGHT, MIN_WIDGET_HEIGHT, MAX_WIDGET_HEIGHT);
     receiveItems(await invoke("get_initial_items"), {
-      resetUnread: !appState.collapsed,
-      seedUnread: appState.collapsed
+      reset: true
     });
 
     if (listen) {
@@ -162,12 +180,13 @@ async function init() {
       });
     }
   } else {
-    receiveItems(fallbackItems, { resetUnread: true });
+    receiveItems(fallbackItems);
   }
 
   render();
   await syncNativeWindowSize();
   setInterval(updateRelativeTimes, 1000);
+  setInterval(tickPomodoro, 1000);
   setInterval(() => {
     const changed = pruneExpiredItems();
     if (changed) {
@@ -188,19 +207,11 @@ function replaceItems(items, options = {}) {
     .slice(0, MAX_RENDERED_ITEMS);
   appState.lastUpdateAt = receivedAt;
 
-  if (!appState.collapsed) {
-    appState.unread = 0;
-  }
-
   render();
 }
 
 async function setCollapsed(collapsed) {
   appState.collapsed = collapsed;
-
-  if (!collapsed) {
-    appState.unread = 0;
-  }
 
   render();
   await syncNativeWindowSize();
@@ -209,7 +220,6 @@ async function setCollapsed(collapsed) {
 function receiveItems(items, options = {}) {
   const existingIds = new Set(appState.items.map((item) => item.id));
   const nextItems = [...appState.items];
-  let newVisibleItems = 0;
   const receivedAt = options.generatedAt
     ? options.generatedAt * 1000
     : Date.now();
@@ -219,7 +229,6 @@ function receiveItems(items, options = {}) {
       continue;
     }
     nextItems.push({ ...item, receivedAt });
-    newVisibleItems += 1;
   }
 
   appState.items = nextItems
@@ -228,50 +237,57 @@ function receiveItems(items, options = {}) {
     .slice(0, MAX_RENDERED_ITEMS);
   appState.lastUpdateAt = receivedAt;
 
-  if (options.seedUnread) {
-    appState.unread = newVisibleItems > 0
-      ? Math.min(9, Math.max(3, newVisibleItems))
-      : 0;
-  } else if (options.resetUnread || !appState.collapsed) {
-    appState.unread = 0;
-  } else {
-    appState.unread = Math.min(9, appState.unread + newVisibleItems);
-  }
-
   render();
 }
 
 function render() {
   pruneExpiredItems();
   elements.html.dataset.collapsed = String(appState.collapsed);
-  elements.unreadBadge.textContent = String(appState.unread || 3);
-  elements.unreadBadge.hidden = !appState.collapsed || appState.unread === 0;
+  elements.html.dataset.section = appState.activeSection.toLowerCase();
 
   for (const tab of elements.tabs) {
     tab.classList.toggle("is-active", tab.dataset.section === appState.activeSection);
   }
 
-  const visibleItems = appState.items.filter((item) => (item.section || "Tech") === appState.activeSection);
-  const nodes = visibleItems.length
-    ? visibleItems.map((item) => createItemNode(item))
-    : [createEmptyNode()];
+  const isToolView = TOOL_SECTIONS.has(appState.activeSection);
+  const isMediaView = appState.activeSection === "Media";
+  elements.itemList.classList.toggle("is-tool-view", isToolView);
+  elements.itemList.classList.toggle("is-media-view", isMediaView);
+  elements.itemList.setAttribute("role", isToolView ? "region" : "list");
+  elements.mediaPlayer.hidden = !isMediaView;
+
+  let nodes;
+  if (appState.activeSection === "Todo") {
+    nodes = [createTodoPanel()];
+  } else if (appState.activeSection === "Pomodoro") {
+    nodes = [createPomodoroPanel()];
+  } else if (appState.activeSection === "Media") {
+    nodes = [createMediaPanel()];
+  } else {
+    const visibleItems = appState.items.filter((item) => (item.section || "Tech") === appState.activeSection);
+    nodes = visibleItems.length
+      ? visibleItems.map((item) => createItemNode(item))
+      : [createEmptyNode()];
+  }
   elements.itemList.replaceChildren(...nodes);
 
-  updateRelativeTimes();
+  if (NEWS_SECTIONS.has(appState.activeSection)) {
+    updateRelativeTimes();
+  } else {
+    updateFooterStatus();
+  }
+  updateMediaPlayerMeta();
 }
 
 function createItemNode(item) {
+  const importanceLevel = getImportanceLevel(item.importance);
   const article = document.createElement("article");
-  article.className = "news-item";
+  article.className = `news-item importance-${importanceLevel}`;
   article.setAttribute("role", "listitem");
 
   const meta = document.createElement("div");
   meta.className = "item-meta";
   meta.textContent = `${item.source}  -  ${relativeTime(item.timestamp)}`;
-
-  const tag = document.createElement("span");
-  tag.className = `tag tag-${item.tag.toLowerCase()}`;
-  tag.textContent = item.tag.toUpperCase();
 
   const headline = document.createElement("button");
   headline.className = "headline";
@@ -279,8 +295,604 @@ function createItemNode(item) {
   headline.dataset.url = item.url;
   headline.textContent = item.title;
 
-  article.append(meta, tag, headline);
+  article.append(meta, headline);
   return article;
+}
+
+function getImportanceLevel(importance) {
+  const score = Number(importance) || 0;
+
+  if (score > 70) {
+    return "high";
+  }
+
+  if (score >= 40) {
+    return "medium";
+  }
+
+  return "low";
+}
+
+function createTodoPanel() {
+  const panel = document.createElement("section");
+  panel.className = "tool-panel todo-panel";
+  panel.setAttribute("aria-label", "Todo list");
+
+  const form = document.createElement("form");
+  form.className = "todo-form";
+
+  const input = document.createElement("input");
+  input.className = "todo-input";
+  input.type = "text";
+  input.maxLength = 90;
+  input.placeholder = "Add a task";
+  input.setAttribute("aria-label", "New task");
+
+  const addButton = document.createElement("button");
+  addButton.className = "todo-add";
+  addButton.type = "submit";
+  addButton.textContent = "+";
+  addButton.setAttribute("aria-label", "Add task");
+
+  form.append(input, addButton);
+  form.addEventListener("submit", (event) => {
+    event.preventDefault();
+    addTodo(input.value);
+    input.value = "";
+  });
+
+  const list = document.createElement("div");
+  list.className = "todo-list";
+  list.setAttribute("role", "list");
+
+  if (appState.todos.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "tool-empty";
+    empty.textContent = "No tasks";
+    list.append(empty);
+  } else {
+    for (const todo of appState.todos) {
+      list.append(createTodoNode(todo));
+    }
+  }
+
+  panel.append(form, list);
+  return panel;
+}
+
+function createTodoNode(todo) {
+  const row = document.createElement("div");
+  row.className = "todo-item";
+  row.classList.toggle("is-complete", todo.completed);
+  row.setAttribute("role", "listitem");
+
+  const check = document.createElement("button");
+  check.className = "todo-check";
+  check.type = "button";
+  check.setAttribute("aria-label", todo.completed ? "Mark task active" : "Mark task complete");
+  check.addEventListener("click", () => toggleTodo(todo.id));
+
+  const title = document.createElement("span");
+  title.className = "todo-title";
+  title.textContent = todo.title;
+
+  const remove = document.createElement("button");
+  remove.className = "todo-remove";
+  remove.type = "button";
+  remove.textContent = "x";
+  remove.setAttribute("aria-label", "Delete task");
+  remove.addEventListener("click", () => removeTodo(todo.id));
+
+  row.append(check, title, remove);
+  return row;
+}
+
+function createPomodoroPanel() {
+  const panel = document.createElement("section");
+  panel.className = "tool-panel pomo-panel";
+  panel.setAttribute("aria-label", "Pomodoro timer");
+
+  const clock = document.createElement("div");
+  clock.className = `pixel-clock pixel-clock-${appState.pomodoro.mode}`;
+  clock.classList.toggle("is-running", appState.pomodoro.running);
+
+  const label = document.createElement("div");
+  label.className = "pixel-clock-label";
+  label.textContent = appState.pomodoro.mode === "work" ? "WORK" : "BREAK";
+
+  const time = document.createElement("div");
+  time.className = "pixel-clock-time";
+  time.textContent = formatClock(appState.pomodoro.remainingSeconds);
+
+  const progress = document.createElement("div");
+  progress.className = "pixel-clock-progress";
+  const progressFill = document.createElement("span");
+  progressFill.style.width = `${getPomodoroProgress()}%`;
+  progress.append(progressFill);
+
+  clock.append(label, time, progress);
+
+  const settings = document.createElement("div");
+  settings.className = "pomo-settings";
+  settings.append(
+    createMinuteField("Work", "workMinutes"),
+    createMinuteField("Break", "breakMinutes")
+  );
+
+  const actions = document.createElement("div");
+  actions.className = "pomo-actions";
+  actions.append(
+    createPomodoroButton(appState.pomodoro.running ? "Pause" : "Start", () => {
+      if (appState.pomodoro.running) {
+        pausePomodoro();
+      } else {
+        startPomodoro();
+      }
+    }),
+    createPomodoroButton("Reset", resetPomodoro),
+    createPomodoroButton("Skip", skipPomodoro)
+  );
+
+  panel.append(clock, settings, actions);
+  return panel;
+}
+
+function createMinuteField(labelText, key) {
+  const label = document.createElement("label");
+  label.className = "minute-field";
+
+  const labelSpan = document.createElement("span");
+  labelSpan.textContent = labelText;
+
+  const input = document.createElement("input");
+  input.className = "minute-input";
+  input.type = "number";
+  input.min = "1";
+  input.max = "180";
+  input.step = "1";
+  input.value = String(appState.pomodoro[key]);
+  input.addEventListener("change", () => updatePomodoroMinutes(key, input.value));
+
+  label.append(labelSpan, input);
+  return label;
+}
+
+function createPomodoroButton(label, onClick) {
+  const button = document.createElement("button");
+  button.className = "pomo-button";
+  button.type = "button";
+  button.textContent = label;
+  button.addEventListener("click", onClick);
+  return button;
+}
+
+function createMediaPanel() {
+  const panel = document.createElement("section");
+  panel.className = "tool-panel media-panel";
+  panel.setAttribute("aria-label", "YouTube media search");
+  panel.append(createMediaSearchPanel());
+  return panel;
+}
+
+function createMediaSearchPanel() {
+  const panel = document.createElement("section");
+  panel.className = "media-search";
+  panel.setAttribute("aria-label", "Search YouTube music and podcasts");
+
+  const controls = document.createElement("div");
+  controls.className = "media-search-controls";
+
+  const modes = document.createElement("div");
+  modes.className = "media-search-modes";
+  modes.setAttribute("role", "group");
+  modes.setAttribute("aria-label", "Search type");
+
+  for (const mode of ["music", "podcast"]) {
+    const button = document.createElement("button");
+    button.className = "media-search-mode";
+    button.classList.toggle("is-active", appState.media.searchMode === mode);
+    button.type = "button";
+    button.textContent = mode === "music" ? "Music" : "Podcast";
+    button.setAttribute("aria-pressed", String(appState.media.searchMode === mode));
+    button.addEventListener("click", () => setMediaSearchMode(mode));
+    modes.append(button);
+  }
+
+  const form = document.createElement("form");
+  form.className = "media-search-form";
+
+  const input = document.createElement("input");
+  input.className = "media-search-input";
+  input.type = "search";
+  input.value = appState.media.searchQuery;
+  input.placeholder = appState.media.searchMode === "music" ? "Search music" : "Search podcasts";
+  input.setAttribute("aria-label", "Search YouTube");
+  input.addEventListener("input", () => {
+    appState.media.searchQuery = input.value;
+    if (!input.value.trim()) {
+      appState.media.searchResults = [];
+      appState.media.searchStatus = "";
+      updateFooterStatus();
+    }
+  });
+
+  const submit = document.createElement("button");
+  submit.className = "media-search-submit";
+  submit.type = "submit";
+  submit.textContent = "Search";
+
+  form.append(input, submit);
+  form.addEventListener("submit", (event) => {
+    event.preventDefault();
+    appState.media.searchQuery = input.value;
+    queueMediaSearch({ immediate: true });
+  });
+
+  controls.append(modes, form);
+
+  const results = document.createElement("div");
+  results.className = "media-search-results";
+  results.setAttribute("role", "list");
+  renderMediaSearchResults(results);
+
+  panel.append(controls, results);
+  return panel;
+}
+
+function renderMediaSearchResults(container) {
+  if (appState.media.searchStatus) {
+    const status = document.createElement("div");
+    status.className = "media-search-empty";
+    status.textContent = appState.media.searchStatus;
+    container.replaceChildren(status);
+    return;
+  }
+
+  const query = appState.media.searchQuery.trim();
+  if (!query) {
+    const empty = document.createElement("div");
+    empty.className = "media-search-empty";
+    empty.textContent = "Search music or podcasts on YouTube";
+    container.replaceChildren(empty);
+    return;
+  }
+
+  if (appState.media.searchResults.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "media-search-empty";
+    empty.textContent = "No YouTube results";
+    container.replaceChildren(empty);
+    return;
+  }
+
+  container.replaceChildren(...appState.media.searchResults.map(createMediaSearchResultNode));
+}
+
+function createMediaSearchResultNode(item) {
+  const row = document.createElement("button");
+  row.className = "media-search-result";
+  row.type = "button";
+  row.setAttribute("role", "listitem");
+  row.addEventListener("click", () => playMediaItem(item));
+
+  const title = document.createElement("span");
+  title.className = "media-search-result-title";
+  title.textContent = item.title;
+
+  const detail = document.createElement("span");
+  detail.className = "media-search-result-detail";
+  detail.textContent = item.detail;
+
+  row.append(title, detail);
+  return row;
+}
+
+let mediaSearchTimer = 0;
+let mediaSearchRequestId = 0;
+
+function queueMediaSearch(options = {}) {
+  clearTimeout(mediaSearchTimer);
+  mediaSearchRequestId += 1;
+  const requestId = mediaSearchRequestId;
+  const query = appState.media.searchQuery.trim();
+  const mediaType = appState.media.searchMode;
+
+  if (query.length < 2) {
+    appState.media.searchResults = [];
+    appState.media.searchStatus = query ? "Keep typing" : "";
+    if (appState.activeSection === "Media") {
+      render();
+    }
+    updateFooterStatus();
+    return;
+  }
+
+  if (!invoke) {
+    appState.media.searchResults = [];
+    appState.media.searchStatus = "Search works in the desktop app";
+    if (appState.activeSection === "Media") {
+      render();
+    }
+    updateFooterStatus();
+    return;
+  }
+
+  appState.media.searchStatus = mediaType === "music" ? "Searching music" : "Searching podcasts";
+  if (appState.activeSection === "Media") {
+    render();
+  }
+  updateFooterStatus();
+
+  const delay = options.immediate ? 0 : MEDIA_SEARCH_DEBOUNCE_MS;
+  mediaSearchTimer = setTimeout(async () => {
+    try {
+      const results = await invoke("search_youtube_media", { query, mediaType });
+      if (requestId !== mediaSearchRequestId) {
+        return;
+      }
+
+      appState.media.searchResults = normalizeYouTubeMediaResults(results, mediaType);
+      appState.media.searchStatus = "";
+      if (appState.activeSection === "Media") {
+        render();
+      }
+      updateFooterStatus();
+    } catch {
+      if (requestId !== mediaSearchRequestId) {
+        return;
+      }
+
+      appState.media.searchResults = [];
+      appState.media.searchStatus = "Search unavailable";
+      if (appState.activeSection === "Media") {
+        render();
+      }
+      updateFooterStatus();
+    }
+  }, delay);
+}
+
+function setMediaSearchMode(mode) {
+  if (!["music", "podcast"].includes(mode) || appState.media.searchMode === mode) {
+    return;
+  }
+
+  appState.media.searchMode = mode;
+  localStorage.setItem(MEDIA_SEARCH_MODE_KEY, mode);
+  appState.media.searchResults = [];
+  appState.media.searchStatus = "";
+  if (appState.media.searchQuery.trim().length >= 2) {
+    queueMediaSearch({ immediate: true });
+  }
+  render();
+  updateFooterStatus();
+}
+
+function normalizeYouTubeMediaResults(results, mediaType) {
+  if (!Array.isArray(results)) {
+    return [];
+  }
+
+  return results
+    .filter((item) => item && item.title && (item.videoId || item.playlistId))
+    .map((item) => ({
+      id: String(item.id || `${item.kind}-${item.videoId || item.playlistId}`),
+      title: String(item.title),
+      detail: String(item.detail || `YouTube ${mediaType}`),
+      kind: item.kind === "playlist" ? "playlist" : "video",
+      videoId: item.videoId ? String(item.videoId) : undefined,
+      playlistId: item.playlistId ? String(item.playlistId) : undefined
+    }))
+    .slice(0, 10);
+}
+
+function playMediaItem(item) {
+  const embedUrl = getMediaEmbedUrl(item);
+  if (!embedUrl) {
+    return;
+  }
+
+  appState.media.activeItem = item;
+  elements.mediaFrame.src = embedUrl;
+  updateMediaPlayerMeta();
+  updateFooterStatus();
+  render();
+}
+
+function getMediaEmbedUrl(item) {
+  const params = "autoplay=1&playsinline=1&rel=0";
+  if (item.kind === "playlist" && item.playlistId) {
+    return `https://www.youtube.com/embed/videoseries?list=${encodeURIComponent(item.playlistId)}&${params}`;
+  }
+
+  if (item.kind === "video" && item.videoId) {
+    return `https://www.youtube.com/embed/${encodeURIComponent(item.videoId)}?${params}`;
+  }
+
+  return "";
+}
+
+function updateMediaPlayerMeta() {
+  if (!appState.media.activeItem) {
+    elements.mediaNowPlaying.textContent = "Nothing playing";
+    return;
+  }
+
+  elements.mediaNowPlaying.textContent = `Playing ${appState.media.activeItem.title}`;
+}
+
+function addTodo(title) {
+  const cleanedTitle = title.trim();
+  if (!cleanedTitle) {
+    return;
+  }
+
+  appState.todos.unshift({
+    id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+    title: cleanedTitle,
+    completed: false
+  });
+  saveTodos();
+  render();
+}
+
+function toggleTodo(id) {
+  appState.todos = appState.todos.map((todo) => (
+    todo.id === id ? { ...todo, completed: !todo.completed } : todo
+  ));
+  saveTodos();
+  render();
+}
+
+function removeTodo(id) {
+  appState.todos = appState.todos.filter((todo) => todo.id !== id);
+  saveTodos();
+  render();
+}
+
+function startPomodoro() {
+  appState.pomodoro.running = true;
+  appState.pomodoro.lastTickAt = Date.now();
+  render();
+}
+
+function pausePomodoro() {
+  appState.pomodoro.running = false;
+  appState.pomodoro.lastTickAt = 0;
+  render();
+}
+
+function resetPomodoro() {
+  appState.pomodoro.running = false;
+  appState.pomodoro.lastTickAt = 0;
+  appState.pomodoro.remainingSeconds = getPomodoroDurationSeconds(appState.pomodoro.mode);
+  render();
+}
+
+function skipPomodoro() {
+  appState.pomodoro.mode = appState.pomodoro.mode === "work" ? "break" : "work";
+  appState.pomodoro.remainingSeconds = getPomodoroDurationSeconds(appState.pomodoro.mode);
+  appState.pomodoro.lastTickAt = appState.pomodoro.running ? Date.now() : 0;
+  render();
+}
+
+function tickPomodoro() {
+  if (!appState.pomodoro.running) {
+    return;
+  }
+
+  const now = Date.now();
+  const elapsed = Math.floor((now - appState.pomodoro.lastTickAt) / 1000);
+  if (elapsed < 1) {
+    return;
+  }
+
+  appState.pomodoro.lastTickAt += elapsed * 1000;
+  appState.pomodoro.remainingSeconds -= elapsed;
+
+  if (appState.pomodoro.remainingSeconds <= 0) {
+    appState.pomodoro.mode = appState.pomodoro.mode === "work" ? "break" : "work";
+    appState.pomodoro.remainingSeconds = getPomodoroDurationSeconds(appState.pomodoro.mode);
+    appState.pomodoro.lastTickAt = now;
+  }
+
+  if (appState.activeSection === "Pomodoro") {
+    render();
+  } else {
+    updateFooterStatus();
+  }
+}
+
+function updatePomodoroMinutes(key, value) {
+  const fallback = key === "workMinutes" ? DEFAULT_WORK_MINUTES : DEFAULT_BREAK_MINUTES;
+  appState.pomodoro[key] = clampMinutes(value, fallback);
+  savePomodoroSettings();
+
+  const editedMode = key === "workMinutes" ? "work" : "break";
+  if (!appState.pomodoro.running && appState.pomodoro.mode === editedMode) {
+    appState.pomodoro.remainingSeconds = getPomodoroDurationSeconds(editedMode);
+    render();
+  }
+}
+
+function createPomodoroState() {
+  const settings = loadPomodoroSettings();
+  return {
+    mode: "work",
+    running: false,
+    workMinutes: settings.workMinutes,
+    breakMinutes: settings.breakMinutes,
+    remainingSeconds: settings.workMinutes * 60,
+    lastTickAt: 0
+  };
+}
+
+function getPomodoroDurationSeconds(mode) {
+  return (mode === "work" ? appState.pomodoro.workMinutes : appState.pomodoro.breakMinutes) * 60;
+}
+
+function getPomodoroProgress() {
+  const duration = getPomodoroDurationSeconds(appState.pomodoro.mode);
+  if (duration <= 0) {
+    return 0;
+  }
+
+  return Math.round((appState.pomodoro.remainingSeconds / duration) * 100);
+}
+
+function loadTodos() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(TODO_STORAGE_KEY) || "[]");
+    if (!Array.isArray(parsed)) {
+      return [];
+    }
+
+    return parsed
+      .filter((todo) => todo && typeof todo.title === "string")
+      .slice(0, 80)
+      .map((todo) => ({
+        id: String(todo.id || `${Date.now()}-${Math.random()}`),
+        title: todo.title.slice(0, 90),
+        completed: Boolean(todo.completed)
+      }));
+  } catch {
+    return [];
+  }
+}
+
+function saveTodos() {
+  localStorage.setItem(TODO_STORAGE_KEY, JSON.stringify(appState.todos));
+}
+
+function loadMediaSearchMode() {
+  return localStorage.getItem(MEDIA_SEARCH_MODE_KEY) === "podcast" ? "podcast" : "music";
+}
+
+function loadPomodoroSettings() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(POMODORO_STORAGE_KEY) || "{}");
+    return {
+      workMinutes: clampMinutes(parsed.workMinutes, DEFAULT_WORK_MINUTES),
+      breakMinutes: clampMinutes(parsed.breakMinutes, DEFAULT_BREAK_MINUTES)
+    };
+  } catch {
+    return {
+      workMinutes: DEFAULT_WORK_MINUTES,
+      breakMinutes: DEFAULT_BREAK_MINUTES
+    };
+  }
+}
+
+function savePomodoroSettings() {
+  localStorage.setItem(POMODORO_STORAGE_KEY, JSON.stringify({
+    workMinutes: appState.pomodoro.workMinutes,
+    breakMinutes: appState.pomodoro.breakMinutes
+  }));
+}
+
+function getSavedSection() {
+  const savedSection = localStorage.getItem("kaapiwire.section") || "Tech";
+  return APP_SECTIONS.has(savedSection) ? savedSection : "Tech";
 }
 
 function createEmptyNode() {
@@ -312,6 +924,41 @@ function updateRelativeTimes() {
     if (meta) {
       meta.textContent = `${item.source}  -  ${relativeTime(item.timestamp)}`;
     }
+  }
+
+  updateFooterStatus();
+}
+
+function updateFooterStatus() {
+  if (appState.activeSection === "Todo") {
+    const openCount = appState.todos.filter((todo) => !todo.completed).length;
+    elements.lastUpdate.textContent = `${openCount} task${openCount === 1 ? "" : "s"} open`;
+    return;
+  }
+
+  if (appState.activeSection === "Pomodoro") {
+    const mode = appState.pomodoro.mode === "work" ? "work" : "break";
+    const state = appState.pomodoro.running ? "running" : "paused";
+    elements.lastUpdate.textContent = `${mode} ${formatClock(appState.pomodoro.remainingSeconds)} ${state}`;
+    return;
+  }
+
+  if (appState.activeSection === "Media") {
+    if (appState.media.searchStatus) {
+      elements.lastUpdate.textContent = appState.media.searchStatus.toLowerCase();
+      return;
+    }
+
+    if (appState.media.activeItem) {
+      elements.lastUpdate.textContent = `playing ${appState.media.activeItem.title}`;
+      return;
+    }
+
+    const resultCount = appState.media.searchResults.length;
+    elements.lastUpdate.textContent = appState.media.searchQuery.trim()
+      ? `${resultCount} ${appState.media.searchMode} result${resultCount === 1 ? "" : "s"}`
+      : "media search ready";
+    return;
   }
 
   elements.lastUpdate.textContent = `last update ${relativeTime(
@@ -456,6 +1103,17 @@ function queueSizeSave() {
 
 function clamp(value, min, max) {
   return Math.min(max, Math.max(min, Number(value) || min));
+}
+
+function clampMinutes(value, fallback) {
+  return Math.min(180, Math.max(1, Math.round(Number(value) || fallback)));
+}
+
+function formatClock(totalSeconds) {
+  const seconds = Math.max(0, Math.floor(totalSeconds));
+  const minutes = Math.floor(seconds / 60);
+  const remainingSeconds = seconds % 60;
+  return `${String(minutes).padStart(2, "0")}:${String(remainingSeconds).padStart(2, "0")}`;
 }
 
 function relativeTime(timestampSeconds) {

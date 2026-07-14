@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Kaapiwire",
+  "productName": "kaapi wire",
   "version": "0.1.0",
   "identifier": "com.kaapiwire.widget",
   "build": {
@@ -13,7 +13,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "Kaapiwire",
+        "title": "kaapi wire",
         "width": 360,
         "height": 430,
         "minWidth": 40,

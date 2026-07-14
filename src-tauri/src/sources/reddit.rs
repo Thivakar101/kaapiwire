@@ -61,7 +61,7 @@ pub async fn fetch(client: &Client) -> SourceResult<Vec<RawItem>> {
         if combined.contains("403") || combined.contains("Blocked") {
             if !REDDIT_BLOCKED_NOTICE_SHOWN.swap(true, Ordering::Relaxed) {
                 eprintln!(
-                    "Reddit public JSON is blocked on this network, so Kaapiwire is skipping Reddit for this session."
+                    "Reddit public JSON is blocked on this network, so kaapi wire is skipping Reddit for this session."
                 );
             }
         } else if !REDDIT_ERROR_NOTICE_SHOWN.swap(true, Ordering::Relaxed) {

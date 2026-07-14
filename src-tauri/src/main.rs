@@ -38,7 +38,7 @@ const DISPLAY_ITEM_LIMIT: usize = 40;
 const DISPLAY_SECTION_SOFT_LIMIT: usize = 20;
 const STARTUP_POLL_DELAY_SECONDS: u64 = 20;
 const USER_AGENT: &str =
-    "Kaapiwire/0.1 (local Windows desktop widget; public polling; no telemetry)";
+    "kaapi-wire/0.1 (local Windows desktop widget; public polling; no telemetry)";
 
 static HN_ERROR_NOTICE_SHOWN: AtomicBool = AtomicBool::new(false);
 static TECHMEME_ERROR_NOTICE_SHOWN: AtomicBool = AtomicBool::new(false);
@@ -282,7 +282,7 @@ fn main() {
                 setup_error(format!("Could not create app data directory: {error}"))
             })?;
 
-            let db = Arc::new(Db::open(&data_dir.join("kaapiwire.sqlite3")).map_err(setup_error)?);
+            let db = Arc::new(Db::open(&data_dir.join("kaapi-wire.sqlite3")).map_err(setup_error)?);
             let client = build_http_client().map_err(setup_error)?;
             let state = Arc::new(AppState {
                 db,
@@ -314,7 +314,7 @@ fn main() {
             search_youtube_media
         ])
         .run(tauri::generate_context!())
-        .expect("error while running Kaapiwire");
+        .expect("error while running kaapi wire");
 }
 
 fn setup_error(message: impl Into<String>) -> std::io::Error {
@@ -325,14 +325,14 @@ fn ensure_autostart_registered() -> Result<(), String> {
     #[cfg(all(target_os = "windows", not(debug_assertions)))]
     {
         let exe = std::env::current_exe()
-            .map_err(|error| format!("Could not resolve Kaapiwire executable path: {error}"))?;
+            .map_err(|error| format!("Could not resolve kaapi wire executable path: {error}"))?;
         let exe_arg = format!("\"{}\"", exe.display());
         let status = std::process::Command::new("reg")
             .args([
                 "add",
                 r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run",
                 "/v",
-                "Kaapiwire",
+                "kaapi wire",
                 "/t",
                 "REG_SZ",
                 "/d",
@@ -340,11 +340,11 @@ fn ensure_autostart_registered() -> Result<(), String> {
                 "/f",
             ])
             .status()
-            .map_err(|error| format!("Could not register Kaapiwire startup entry: {error}"))?;
+            .map_err(|error| format!("Could not register kaapi wire startup entry: {error}"))?;
 
         if !status.success() {
             return Err(format!(
-                "Could not register Kaapiwire startup entry: reg.exe exited with {status}"
+                "Could not register kaapi wire startup entry: reg.exe exited with {status}"
             ));
         }
     }

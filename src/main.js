@@ -1,4 +1,5 @@
 const VISIBLE_ITEM_TTL_MS = 3 * 60 * 1000;
+const MAX_NEWS_ITEM_AGE_MS = 15 * 60 * 1000;
 const DEFAULT_WIDGET_WIDTH = 360;
 const DEFAULT_WIDGET_HEIGHT = 430;
 const MIN_WIDGET_WIDTH = 300;
@@ -10,9 +11,9 @@ const COLLAPSED_DRAG_THRESHOLD = 6;
 const NEWS_SECTIONS = new Set(["Tech", "General"]);
 const TOOL_SECTIONS = new Set(["Todo", "Pomodoro", "Media"]);
 const APP_SECTIONS = new Set([...NEWS_SECTIONS, ...TOOL_SECTIONS]);
-const TODO_STORAGE_KEY = "kaapiwire.todos";
-const POMODORO_STORAGE_KEY = "kaapiwire.pomodoro";
-const MEDIA_SEARCH_MODE_KEY = "kaapiwire.media.searchMode";
+const TODO_STORAGE_KEY = "kaapi-wire.todos";
+const POMODORO_STORAGE_KEY = "kaapi-wire.pomodoro";
+const MEDIA_SEARCH_MODE_KEY = "kaapi-wire.media.searchMode";
 const DEFAULT_WORK_MINUTES = 25;
 const DEFAULT_BREAK_MINUTES = 5;
 const MEDIA_SEARCH_DEBOUNCE_MS = 450;
@@ -137,7 +138,7 @@ window.addEventListener("resize", () => {
 for (const tab of elements.tabs) {
   tab.addEventListener("click", () => {
     appState.activeSection = tab.dataset.section;
-    localStorage.setItem("kaapiwire.section", appState.activeSection);
+    localStorage.setItem("kaapi-wire.section", appState.activeSection);
     render();
   });
 }
@@ -479,6 +480,10 @@ function createMediaSearchPanel() {
   panel.className = "media-search";
   panel.setAttribute("aria-label", "Search YouTube music and podcasts");
 
+  const licenseNote = document.createElement("div");
+  licenseNote.className = "media-license-note";
+  licenseNote.textContent = "Licensed music is not allowed";
+
   const controls = document.createElement("div");
   controls.className = "media-search-controls";
 
@@ -535,7 +540,7 @@ function createMediaSearchPanel() {
   results.setAttribute("role", "list");
   renderMediaSearchResults(results);
 
-  panel.append(controls, results);
+  panel.append(licenseNote, controls, results);
   return panel;
 }
 
@@ -891,7 +896,7 @@ function savePomodoroSettings() {
 }
 
 function getSavedSection() {
-  const savedSection = localStorage.getItem("kaapiwire.section") || "Tech";
+  const savedSection = localStorage.getItem("kaapi-wire.section") || "Tech";
   return APP_SECTIONS.has(savedSection) ? savedSection : "Tech";
 }
 
@@ -992,7 +997,8 @@ function pruneExpiredItems() {
 
 function isExpired(item) {
   const receivedAt = item.receivedAt || appState.lastUpdateAt;
-  return Date.now() - receivedAt > VISIBLE_ITEM_TTL_MS;
+  const itemAgeMs = Date.now() - (Number(item.timestamp) || 0) * 1000;
+  return Date.now() - receivedAt > VISIBLE_ITEM_TTL_MS || itemAgeMs > MAX_NEWS_ITEM_AGE_MS;
 }
 
 async function startHeaderDrag(event) {
